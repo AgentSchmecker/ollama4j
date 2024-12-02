@@ -15,11 +15,15 @@ import io.github.ollama4j.models.ps.ModelsProcessResponse;
 import io.github.ollama4j.models.request.*;
 import io.github.ollama4j.models.response.*;
 import io.github.ollama4j.tools.*;
+import io.github.ollama4j.tools.annotations.OllamaToolService;
+import io.github.ollama4j.tools.annotations.ToolSpec;
 import io.github.ollama4j.utils.Options;
 import io.github.ollama4j.utils.Utils;
 import lombok.Setter;
 
 import java.io.*;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
@@ -779,6 +783,33 @@ public class OllamaAPI {
 
     public void registerTool(Tools.ToolSpecification toolSpecification) {
         toolRegistry.addFunction(toolSpecification.getFunctionName(), toolSpecification.getToolDefinition());
+    }
+
+    public void registerTools() throws ClassNotFoundException {
+        Class<?> callerClass = Class.forName(Thread.currentThread().getStackTrace()[2].getClassName());
+
+        OllamaToolService ollamaToolServiceAnnotation = callerClass.getDeclaredAnnotation(OllamaToolService.class);
+        if(ollamaToolServiceAnnotation == null) {
+            throw new IllegalStateException(callerClass + " is not annotated as " + OllamaToolService.class);
+        }
+
+        Class<?>[] providers = ollamaToolServiceAnnotation.providers();
+
+        for(Class<?> provider : providers){
+            System.err.println("Provider: " + provider.getName());
+            Method[] methods = provider.getMethods();
+            for(Method m : methods) {
+                ToolSpec toolSpec = m.getDeclaredAnnotation(ToolSpec.class);
+                if(toolSpec == null){
+                    continue;
+                }
+                System.err.println("Method: " + m.getName());
+                Tools.ToolSpecification toolSpecification = Tools.ToolSpecification.builder().functionName(toolSpec.name()).functionDescription(toolSpec.desc()).build();
+                toolRegistry.addFunction(toolSpecification.getFunctionName(), Object::toString);
+
+            }
+        }
+
     }
 
     /**
