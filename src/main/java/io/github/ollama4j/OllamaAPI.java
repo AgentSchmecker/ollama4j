@@ -16,14 +16,18 @@ import io.github.ollama4j.models.request.*;
 import io.github.ollama4j.models.response.*;
 import io.github.ollama4j.tools.*;
 import io.github.ollama4j.tools.annotations.OllamaToolService;
+import io.github.ollama4j.tools.annotations.ToolProperty;
 import io.github.ollama4j.tools.annotations.ToolSpec;
 import io.github.ollama4j.utils.Options;
+import io.github.ollama4j.utils.PromptBuilder;
 import io.github.ollama4j.utils.Utils;
 import lombok.Setter;
 
 import java.io.*;
 import java.lang.annotation.Annotation;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
@@ -34,6 +38,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Duration;
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -603,6 +608,15 @@ public class OllamaAPI {
         OllamaToolsResult toolResult = new OllamaToolsResult();
         Map<ToolFunctionCallSpec, Object> toolResults = new HashMap<>();
 
+        if(!prompt.startsWith("[AVAILABLE_TOOLS]")){
+            final Tools.PromptBuilder promptBuilder = new Tools.PromptBuilder();
+            for(Tools.ToolSpecification spec :  toolRegistry.getRegisteredSpecs()) {
+                promptBuilder.withToolSpecification(spec);
+            }
+            promptBuilder.withPrompt(prompt);
+            prompt = promptBuilder.build();
+        }
+
         OllamaResult result = generate(model, prompt, raw, options, null);
         toolResult.setModelResult(result);
 
@@ -782,7 +796,7 @@ public class OllamaAPI {
     }
 
     public void registerTool(Tools.ToolSpecification toolSpecification) {
-        toolRegistry.addFunction(toolSpecification.getFunctionName(), toolSpecification.getToolDefinition());
+        toolRegistry.addFunction(toolSpecification.getFunctionName(), toolSpecification.getToolDefinition(), toolSpecification);
     }
 
     public void registerTools() throws ClassNotFoundException {
@@ -803,10 +817,33 @@ public class OllamaAPI {
                 if(toolSpec == null){
                     continue;
                 }
-                System.err.println("Method: " + m.getName());
-                Tools.ToolSpecification toolSpecification = Tools.ToolSpecification.builder().functionName(toolSpec.name()).functionDescription(toolSpec.desc()).build();
-                toolRegistry.addFunction(toolSpecification.getFunctionName(), Object::toString);
+                String operationName = !toolSpec.name().isBlank() ? toolSpec.name() : m.getName();
+                System.err.println("Method: " + operationName);
 
+                final Tools.PropsBuilder propsBuilder = new Tools.PropsBuilder();
+                LinkedHashMap<String,Object> methodParams = new LinkedHashMap<>();
+
+                for (Parameter parameter : m.getParameters()) {
+                    final ToolProperty toolPropertyAnn = parameter.getDeclaredAnnotation(ToolProperty.class);
+                    if(toolPropertyAnn == null) {
+                        continue;
+                    }
+                    String propName = !toolPropertyAnn.name().isBlank() ? toolPropertyAnn.name() : parameter.getName();
+                    methodParams.put(propName,null);
+                    propsBuilder.withProperty(propName,Tools.PromptFuncDefinition.Property.builder().type("string").description(toolPropertyAnn.desc()).required(toolPropertyAnn.required()).build());
+                }
+                final Map<String, Tools.PromptFuncDefinition.Property> params = propsBuilder.build();
+
+                try {
+                    ReflectionalToolFunction reflectionalToolFunction = new ReflectionalToolFunction(provider.getDeclaredConstructor().newInstance(),m,methodParams);
+
+                Tools.ToolSpecification toolSpecification = Tools.ToolSpecification.builder().functionName(operationName).functionDescription(toolSpec.desc()).properties(params).build();
+                toolSpecification.setToolDefinition(reflectionalToolFunction);
+                toolRegistry.addFunction(toolSpecification.getFunctionName(),toolSpecification.getToolDefinition(),toolSpecification);
+                } catch (InstantiationException | IllegalAccessException | InvocationTargetException |
+                         NoSuchMethodException e) {
+                    throw new RuntimeException(e);
+                }
             }
         }
 
